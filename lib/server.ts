@@ -7,14 +7,19 @@ import {
   type Extracted,
   type Generated,
 } from "./document";
-import { analyze, validateChanges } from "./analysis";
+import { analyze, contains, validateChanges } from "./analysis";
 import { rewrite, audit } from "./ai";
-import type { Job, Segment, Analysis, Change, Validation } from "./types";
+import { assessAlignment, jobRequirements, retainAlignedChanges, TARGET_ALIGNMENT } from "./requirements";
+import type { Job, Segment, Analysis, Change, Validation, ConfirmedEvidence, JobRequirement } from "./types";
 
 type RecordData = {
   jd: string;
+  autoTailor?: boolean;
   segments?: Segment[];
   analysis?: Analysis;
+  analysisVersion?: number;
+  requirements?: JobRequirement[];
+  confirmedEvidence?: ConfirmedEvidence[];
   changes?: Change[];
   validation?: Validation;
   pages?: number;
@@ -23,6 +28,7 @@ type RecordData = {
   artifactPrefix?: string;
   rewriteFeedback?: string;
   auditAttempts?: number;
+  auditRejectedIds?: number[];
   filteredEdits?: number;
   previewRegions?: { id: number; page: number; bbox: number[] }[];
 };
@@ -47,14 +53,20 @@ class ApiError extends Error {
     super(message);
   }
 }
-async function readState(id: string) {
-  const row = await E.DB.prepare("SELECT state_key FROM jobs WHERE id=?")
+async function readState(id: string, key?: string) {
+  key ??= (await E.DB.prepare("SELECT state_key FROM jobs WHERE id=?")
     .bind(id)
-    .first<{ state_key: string }>();
-  const data = await E.BUCKET.get(`${id}/${row?.state_key || "state"}`);
+    .first<{ state_key: string }>())?.state_key;
+  const data = await E.BUCKET.get(`${id}/${key || "state"}`);
   if (!data)
     throw new ApiError("Saved processing data could not be found.", 404);
-  return data.json<RecordData>();
+  const state = await data.json<RecordData>();
+  if (state.analysis && state.segments && state.analysisVersion !== 3) {
+    state.analysis = analyze(state.segments.map((segment) => segment.text).join("\n"), state.jd);
+    state.analysisVersion = 3;
+    state.requirements = jobRequirements(state.jd, state.analysis.required);
+  }
+  return state;
 }
 async function writeState(id: string, data: RecordData) {
   await E.BUCKET.put(`${id}/state`, JSON.stringify(data));
@@ -102,7 +114,7 @@ async function limit(user: string) {
     .bind(Date.now())
     .run();
 }
-async function boundedForm(request: Request) {
+async function boundedBody(request: Request, limit: number) {
   const reader = request.body?.getReader();
   if (!reader) throw new ApiError("Request body is missing.");
   const chunks: Uint8Array[] = [];
@@ -111,9 +123,9 @@ async function boundedForm(request: Request) {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.length;
-    if (total > 6 * 1024 * 1024) {
+    if (total > limit) {
       await reader.cancel();
-      throw new ApiError("Upload exceeds the request size limit.", 413);
+      throw new ApiError("Request exceeds the size limit.", 413);
     }
     chunks.push(value);
   }
@@ -123,12 +135,16 @@ async function boundedForm(request: Request) {
     body.set(chunk, offset);
     offset += chunk.length;
   }
+  return body;
+}
+async function boundedForm(request: Request) {
   return new Request(request.url, {
     method: "POST",
     headers: { "Content-Type": request.headers.get("Content-Type") || "" },
-    body,
+    body: await boundedBody(request, 6 * 1024 * 1024),
   }).formData();
 }
+
 async function fileData(id: string) {
   const obj = await E.BUCKET.get(`${id}/original`);
   if (!obj) throw new ApiError("Original file is unavailable.", 404);
@@ -157,17 +173,19 @@ async function advance(job: Job, user: string) {
         (state.segments || []).map((s) => s.text).join("\n"),
         state.jd,
       );
+      state.requirements = jobRequirements(state.jd, state.analysis.required);
+      state.analysisVersion = 3;
     } else if (job.stage === 2) {
       if (!state.analysis)
         throw new Error("Analysis was not saved. Retry analysis.");
     } else if (job.stage === 3) {
-      // Refresh extraction for existing PDFs analyzed before PDF editing was added.
-      if (job.format === "pdf")
+      // Re-extract when tailoring starts so saved jobs see current editability rules.
+      if (!state.rewriteFeedback)
         Object.assign(
           state,
           await documentCall<Extracted>(E, "/extract", {
             file: await fileData(job.id),
-            format: "pdf",
+            format: job.format,
           }),
         );
       if (!state.editable)
@@ -176,17 +194,35 @@ async function advance(job: Job, user: string) {
             "No safely editable text regions were found. Protected fields remain untouched.",
         );
       let feedback = state.rewriteFeedback || "";
-      let accepted = false;
+      const rejectedIds = new Set(state.auditRejectedIds);
+      const hasOtherRegions = state.segments!.some((s) => s.editable && !rejectedIds.has(s.id));
+      const segments = state.segments!.map((s) =>
+        hasOtherRegions && rejectedIds.has(s.id) ? { ...s, editable: false } : s,
+      );
+      const requirements = state.requirements ?? [];
+      const baseline = assessAlignment(requirements, segments);
+      const confirmedTerms = new Set(state.confirmedEvidence?.map((entry) => entry.term));
+      const reviewTarget = Math.min(3, segments.filter((segment) => segment.editable).length);
+      let best: { changes: Change[]; fit: ReturnType<typeof assessAlignment>; relevantGroups: number } | undefined;
       let rejection = "No supported edits were returned.";
+      const replacementBudgets = new Map<number, number>();
       for (let attempt = 0; attempt < 3; attempt++) {
-        const output = await rewrite(E, state.segments!, state.jd, feedback);
+        let output: { changes: Change[] };
+        try {
+          output = await rewrite(
+            E, segments, state.jd, feedback, replacementBudgets, state.confirmedEvidence, baseline.items,
+          );
+        } catch (error) {
+          if (best) break;
+          throw error;
+        }
         const valid: Change[] = [];
         const seen = new Set<number>();
         for (const proposed of output.changes) {
           const source = state.segments!.find((s) => s.id === proposed.id);
           const candidate = { ...proposed, evidence: source?.text || "" };
           try {
-            validateChanges(state.segments!, [candidate]);
+            validateChanges(segments, [candidate], state.confirmedEvidence);
             if (!seen.has(candidate.id)) {
               valid.push(candidate);
               seen.add(candidate.id);
@@ -203,7 +239,7 @@ async function advance(job: Job, user: string) {
           feedback =
             "No previous suggestions passed validation: " +
             rejection +
-            " Return only 1 or 2 minimal edits, keeping every replacement no longer than its original and preserving all facts and numeric tokens.";
+            " Review the other editable segments for job-relevant improvements. Keep replacements concise and preserve all facts and numeric tokens.";
           continue;
         }
         if (job.format === "pdf") {
@@ -217,7 +253,7 @@ async function advance(job: Job, user: string) {
           });
           if (!fit.fits) {
             const rejected = new Set(
-              fit.rejectedIds || output.changes.map((c) => c.id),
+              fit.rejectedIds?.length ? fit.rejectedIds : output.changes.map((c) => c.id),
             );
             const remaining = output.changes.filter((c) => !rejected.has(c.id));
             state.filteredEdits =
@@ -227,30 +263,75 @@ async function advance(job: Job, user: string) {
             if (remaining.length) output.changes = remaining;
             else {
               rejection = fit.reason;
+              for (const change of output.changes) {
+                const limit = replacementBudgets.get(change.id)
+                  ?? state.segments!.find((segment) => segment.id === change.id)?.maxCharacters
+                  ?? change.original.length;
+                const tighter = Math.max(
+                  1, Math.floor(Math.min(limit, change.replacement.length) * 0.85),
+                );
+                replacementBudgets.set(change.id, tighter);
+              }
               feedback =
                 fit.reason +
-                " Return just one or two shorter edits that preserve all facts. Avoid adding words; use concise equivalent wording.";
+                " The regions with reduced character budgets failed the actual font-width check. Use compact equivalents within those budgets or focus on other relevant regions. Preserve all material facts.";
               continue;
             }
           }
         }
-        state.changes = output.changes;
-        accepted = true;
-        break;
+        const combined = new Map(best?.changes.map((change) => [change.id, change]));
+        for (const change of output.changes) combined.set(change.id, change);
+        const aligned = retainAlignedChanges(requirements, segments, [...combined.values()]);
+        state.filteredEdits += combined.size - aligned.length;
+        if (!aligned.length) {
+          rejection = "The suggestions removed existing job-relevant evidence.";
+          feedback = rejection + " Preserve each requirement already covered by the original resume.";
+          continue;
+        }
+        const fit = assessAlignment(requirements, segments, aligned);
+        const relevantGroups = fit.items.filter((item) => item.terms.some((term) =>
+          aligned.some((change) => contains(change.replacement, term)),
+        )).length;
+        if (!best || fit.earned > best.fit.earned ||
+            (fit.earned === best.fit.earned && (
+              fit.workEvidence > best.fit.workEvidence ||
+              (fit.workEvidence === best.fit.workEvidence && (
+                relevantGroups > best.relevantGroups ||
+                (relevantGroups === best.relevantGroups && aligned.length > best.changes.length)
+              ))
+            )))
+          best = { changes: aligned, fit, relevantGroups };
+        const supportedGaps = best.fit.gaps.filter((item) => item.terms.some((term) => confirmedTerms.has(term)));
+        const needsCoverage = supportedGaps.some((item) => item.priority === "Must-have") ||
+          ((best.fit.score ?? TARGET_ALIGNMENT) < TARGET_ALIGNMENT && supportedGaps.length > 0);
+        if (needsCoverage) {
+          feedback = "The best proposed edits still omit these supported requirement groups: " +
+            supportedGaps.map((item) => item.terms.join(" or ")).join(", ") +
+            ". Preserve existing coverage and surface the available evidence where it fits.";
+        } else if (best.changes.length < reviewTarget) {
+          const used = new Set(best.changes.map((change) => change.id));
+          const remainingIds = segments.filter((segment) => segment.editable && !used.has(segment.id)).map((segment) => segment.id);
+          feedback = "Existing edits have been retained. Review these additional editable IDs: " +
+            remainingIds.join(", ") +
+            ". Return additional improvements that demonstrate a specific JD responsibility or qualification. Skip filler and preserve the meaning of surrounding text.";
+        } else if (attempt === 0 && !best.relevantGroups && baseline.earned > 0) {
+          feedback = "The previous edits did not bring a recognized job requirement forward. Try targeted work, project, or summary edits based on the original resume. Improve the visible evidence and preserve every fact.";
+        } else break;
       }
-      if (!accepted)
+      if (!best)
         throw new Error(
-          "The AI edits did not pass the document constraints: " +
-            rejection +
-            " Your original is unchanged. Retry to regenerate.",
+          job.format === "pdf" && replacementBudgets.size
+            ? "The suggested edits could not fit within the original PDF layout. Your original is unchanged. If you have the editable DOCX version, upload it to give tailoring more room."
+            : "The AI edits did not pass the document constraints: " + rejection + " Your original is unchanged.",
         );
+      state.changes = best.changes;
     } else if (job.stage === 4) {
-      validateChanges(state.segments!, state.changes!);
+      validateChanges(state.segments!, state.changes!, state.confirmedEvidence);
       let candidates = state.changes!;
       let supported = false;
       let issues: string[] = [];
       for (let pass = 0; pass < 3; pass++) {
-        const result = await audit(E, state.segments!, candidates);
+        const result = await audit(E, state.segments!, candidates, state.confirmedEvidence);
         if (
           result.supported === true &&
           !result.issues.length &&
@@ -259,34 +340,41 @@ async function advance(job: Job, user: string) {
           supported = true;
           state.changes = candidates;
           state.rewriteFeedback = undefined;
+          state.auditRejectedIds = undefined;
+          state.auditAttempts = 0;
           break;
         }
         issues = result.issues;
         const rejected = new Set(result.rejectedIds);
-        if (
-          !rejected.size ||
-          [...rejected].some((id) => !candidates.some((c) => c.id === id))
-        )
-          break;
-        const remaining = candidates.filter((c) => !rejected.has(c.id));
+        if (!rejected.size || [...rejected].some((id) => !candidates.some((c) => c.id === id))) {
+          if (candidates.length === 1) break;
+          candidates = retainAlignedChanges(state.requirements ?? [], state.segments!, candidates.slice(0, Math.ceil(candidates.length / 2)));
+          if (!candidates.length) break;
+          continue;
+        }
+        state.auditRejectedIds = [...new Set([...(state.auditRejectedIds ?? []), ...rejected])];
+        const remaining = retainAlignedChanges(
+          state.requirements ?? [], state.segments!, candidates.filter((c) => !rejected.has(c.id)),
+        );
         if (!remaining.length) break;
         candidates = remaining;
       }
       if (!supported) {
         if ((state.auditAttempts || 0) >= 2)
           throw new Error(
-            "Factual review could not approve the rewrites after regeneration. No document was released.",
+            "Factual review could not approve the rewrites after regeneration. " +
+            (issues.slice(0, 2).join(" ").slice(0, 650) || "The suggested claims lacked source support."),
           );
         state.auditAttempts = (state.auditAttempts || 0) + 1;
         state.rewriteFeedback =
           "The factual auditor rejected prior edits: " +
           issues.join(" ") +
-          " Make only minimal wording changes that preserve every claim and fact. Return just one or two safe edits.";
+          " Use the other editable regions where available. Preserve named entities, actions, and scope. Never add architectural properties or implementation details from the job description alone.";
         state.changes = undefined;
         retryRewrite = true;
       }
     } else if (job.stage === 5) {
-      validateChanges(state.segments!, state.changes!);
+      validateChanges(state.segments!, state.changes!, state.confirmedEvidence);
     } else if (job.stage === 6) {
       const result = await documentCall<Generated>(E, "/generate", {
         file: await fileData(job.id),
@@ -327,7 +415,7 @@ async function advance(job: Job, user: string) {
     await E.BUCKET.put(`${job.id}/${stateKey}`, JSON.stringify(state));
     const next = retryRewrite ? 3 : job.stage + 1;
     const status =
-      next === 3 && job.stage === 2
+      next === 3 && job.stage === 2 && !(state.autoTailor && state.editable && E.OPENAI_API_KEY)
         ? "analyzed"
         : next === 8
           ? "ready"
@@ -338,7 +426,9 @@ async function advance(job: Job, user: string) {
       .bind(
         next,
         status,
-        state.analysis?.score ?? null,
+        state.analysis && state.segments
+          ? assessAlignment(state.requirements ?? [], state.segments, next === 8 ? state.changes : []).score
+          : null,
         state.analysis?.title || job.role,
         state.analysis?.company || "",
         stateKey,
@@ -457,7 +547,7 @@ export async function handle(request: Request, parts: string[]) {
         .replace(/[^\p{L}\p{N} ._()-]/gu, "_")
         .slice(0, 160);
       await E.BUCKET.put(`${uuid}/original`, data);
-      await writeState(uuid, { jd });
+      await writeState(uuid, { jd, autoTailor: form.get("autoTailor") === "1" });
       try {
         await E.DB.prepare(
           "INSERT INTO jobs (id,user_id,name,format,status,stage,role,company,created_at,expires_at,lease_until,request_key) VALUES (?,?,?,?,'processing',0,'Untitled role','',?,?,0,?)",
@@ -502,6 +592,25 @@ export async function handle(request: Request, parts: string[]) {
           throw new ApiError(
             "Only validated outputs can be regenerated without rewriting.",
           );
+        if (action === "retry" && (job.status === "ready" || (job.status === "error" && job.stage === 4))) {
+          const row = await E.DB.prepare("SELECT state_key FROM jobs WHERE id=? AND user_id=?")
+            .bind(id, user.userId).first<{state_key: string}>();
+          if (!row?.state_key) throw new ApiError("Saved draft unavailable.", 409);
+          const state = await readState(id, row.state_key);
+          state.auditAttempts = 0;
+          state.changes = undefined;
+          if (job.status === "ready") {
+            state.auditRejectedIds = undefined;
+            state.rewriteFeedback = undefined;
+          }
+          const key = `state-retry-${crypto.randomUUID()}`;
+          await E.BUCKET.put(`${id}/${key}`, JSON.stringify(state));
+          const updated = await E.DB.prepare(
+            "UPDATE jobs SET state_key=?,status='processing',stage=3,error=NULL,lease_until=0 WHERE id=? AND user_id=? AND status=? AND stage=? AND state_key=?",
+          ).bind(key, id, user.userId, job.status, job.stage, row.state_key).run();
+          if (!updated.meta.changes) await E.BUCKET.delete(`${id}/${key}`);
+          return json(await owned(id, user.userId));
+        }
         const stage =
           action === "refresh-document"
             ? 6

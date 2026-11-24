@@ -8,32 +8,39 @@ Implemented: real PDF/DOCX upload and extraction, persistent history, determinis
 
 The local owner has configured an API key. The hosted app also needs a reachable document service; the locally tested engine is not automatically deployed with the Cloudflare Worker. Missing connections are visible in Settings and fail safely. This is a tested implementation with explicit constraints, not a claim of production certification.
 
-PDF analysis and direct editing are supported. Supported uniform text runs are rewritten in the original pages, including regular runs next to protected bold text. Original embedded fonts or exact Base-14 fonts, sizes, colors and baselines are reused. Replacements must fit the original line count. Unsupported, rotated, scanned, linked and unavailable-font regions remain protected. DOCX edits are limited to single-run descriptions in recognized summary/experience sections. Mixed-format paragraphs, identity fields, education, headers/footers, tables and unsupported structures remain protected. Some resumes will have no safely editable regions. The engine rejects outputs that cannot be verified, rather than replacing the template.
+PDF analysis and direct editing are supported. Supported uniform text runs are rewritten in the original pages, including regular runs next to protected bold text. Original embedded fonts or exact Base-14 fonts, sizes, colors and baselines are reused. Replacements must fit the original line count. Unsupported, rotated, scanned, linked and unavailable-font regions remain protected. DOCX edits support eligible single-run descriptions and skills lists. Mixed-format paragraphs, identity fields, education, headers/footers and unsupported structures remain protected. Some resumes will have no safely editable regions. The engine rejects outputs that cannot be verified.
+
+Tailoring prioritizes must-have qualifications and relevant achievements. Supported skills lists can bring relevant skills forward and surface skills demonstrated in the original experience or projects. After validation, the result compares original and tailored keyword coverage and shows remaining gaps.
+
+When AI rewriting is configured, **Analyze and tailor** runs analysis, rewriting, fact checks, and document validation in one flow. Fitify finds supporting details in the original resume and updates eligible project, experience, summary, and skills text. The result shows weighted requirement coverage and counts explicit alternatives as one requirement group.
 
 ## Run locally
 
-Requires Node 24+ and Python 3.12+, LibreOffice (`soffice` on PATH), and fonts used by the resume.
+Install Node.js 24 LTS, Python 3.12, LibreOffice Writer, and the fonts used by your resumes. Local development depends on the platforms supported by Cloudflare's native `workerd` runtime. The verification workflow targets Linux, macOS, and Windows. [Cloudflare system requirements](https://developers.cloudflare.com/workers/wrangler/install-and-update/#wrangler-system-requirements)
+
+Run `npm ci` on the machine where you will run Fitify. It recreates `node_modules` from the lockfile. Create the Python virtual environment on the same machine. If you copied the checkout from another computer, move any copied `.venv` aside before running the setup commands.
+
+On macOS or Linux, use a shell with Python 3.12 available as `python3.12`:
 
 ```sh
 npm ci
-python3 -m venv .venv
-.venv/bin/pip install -r document-service/requirements.txt
-npm run db:local
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r document-service/requirements.txt
+npm run dev:local
 ```
 
-Start the document engine first. This helper creates a random local token in the ignored, mode-0600 `.dev.vars` file and runs the service on `127.0.0.1:8091`:
+On Windows, use PowerShell:
 
-```sh
-.venv/bin/python scripts/dev-document-service.py
+```powershell
+npm.cmd ci
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r document-service/requirements.txt
+npm.cmd run dev:local
 ```
 
-In a second terminal:
+The launcher applies local migrations, starts the document engine on `127.0.0.1:8091`, and starts the app on `http://127.0.0.1:5173`. Use the local sign-in link. Press Ctrl+C to stop the stack. The document engine creates a local token in the ignored `.dev.vars` file. Local SQLite/R2 emulation lives in `.wrangler/state`.
 
-```sh
-npm run dev -- --host 127.0.0.1
-```
-
-Visit the printed URL and use the local sign-in link. The starter's local mock identity is sanitized at the preview middleware and is absent from hosted builds. Local SQLite/R2 emulation lives in `.wrangler/state`. Do not expose development mode to the Internet.
+Set `FITIFY_PYTHON` to the executable path to use an existing Python environment. LibreOffice is discovered on PATH or in its standard macOS or Windows install location. Set `SOFFICE_BIN` to the executable path for a custom installation. On Windows use the headless `soffice.com` executable.
 
 Add these entries to `.dev.vars` to enable live rewriting, then restart the app:
 
@@ -116,7 +123,7 @@ npm run test:e2e
 
 `PLAYWRIGHT_CHROME_PATH` optionally selects an installed Chrome executable. Tests cover a real upload/extract/analyze/persist journey, missing-key gating, authenticated original download, blocked unvalidated outputs, invalid uploads, settings and mobile screenshot/overflow checks. Unit tests mock the provider only inside the test process to validate request construction and rejection; production contains no mock provider. Full live AI-to-download E2E remains a required post-key smoke test.
 
-Visual regression baselines are platform-specific. Update them deliberately using `npm run test:e2e -- --update-snapshots` in the same OS/browser environment. The CI workflow runs static, unit, document and browser checks with Linux-specific screenshot baseline handling.
+Visual regression baselines are platform-specific. Update them deliberately using `npm run test:e2e -- --update-snapshots` in the same OS/browser environment. CI starts the stack through Playwright and runs static, unit, document, browser, and build checks on Linux, macOS, and Windows.
 
 Official API references used: [OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs), [Playwright visual comparisons](https://playwright.dev/docs/test-snapshots), [pdfplumber](https://github.com/jsvine/pdfplumber).
 

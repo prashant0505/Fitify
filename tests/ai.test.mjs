@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { modelCall } from "../lib/ai.ts";
+import { modelCall, rewrite } from "../lib/ai.ts";
 test("missing server key fails without contacting provider", async () => {
   await assert.rejects(() => modelCall({}, "policy", {}, {}), /not configured/);
 });
@@ -45,6 +45,31 @@ test("incomplete provider responses never become document edits", async () => {
       () => modelCall({ OPENAI_API_KEY: "test-key-only" }, "", {}, {}),
       /incomplete/,
     );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+test("PDF retries reduce only the rejected region's replacement budget", async () => {
+  const original = globalThis.fetch;
+  let input;
+  globalThis.fetch = async (_, options) => {
+    input = JSON.parse(JSON.parse(options.body).input);
+    return Response.json({
+      status: "completed",
+      output: [{ content: [{ type: "output_text", text: '{"changes":[]}' }] }],
+    });
+  };
+  const text = "Built production React interfaces.";
+  try {
+    await rewrite(
+      { OPENAI_API_KEY: "test-key-only" },
+      [1, 2].map((id) => ({ id, text, editable: true, section: "Experience" })),
+      "React engineer",
+      "Fit each original PDF line.",
+      new Map([[1, 20]]),
+    );
+    assert.deepEqual(input.segments.map((item) => item.maxReplacementCharacters), [20, text.length]);
+    assert.equal(input.layoutFeedback, "Fit each original PDF line.");
   } finally {
     globalThis.fetch = original;
   }

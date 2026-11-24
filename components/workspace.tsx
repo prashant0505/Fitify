@@ -182,7 +182,8 @@ export default function Workspace() {
     setError("");
     idempotency.current = "";
   }
-  async function upload() {
+  const automaticTailoring = Boolean(config?.aiReady && config.documentReady);
+  async function upload(autoTailor: boolean) {
     if (!file) {
       setError("Upload your existing resume first.");
       return;
@@ -202,6 +203,7 @@ export default function Workspace() {
     const form = new FormData();
     form.append("file", file);
     form.append("jd", jd);
+    if (autoTailor) form.append("autoTailor", "1");
     const xhr = new XMLHttpRequest();
     uploadRequest.current = xhr;
     xhr.open("POST", "/api/jobs");
@@ -218,7 +220,7 @@ export default function Workspace() {
         if (xhr.status >= 400) throw new Error(data.error || "Upload failed.");
         setJob(data);
         void refresh();
-        notify("Original securely saved. Analysis started.");
+        notify(autoTailor ? "Resume saved. Tailoring started." : "Resume saved. Analysis started.");
       } catch (e) {
         setError((e as Error).message);
       }
@@ -296,7 +298,7 @@ export default function Workspace() {
         </div>
         {rows.map((j) => (
           <div className="table-row" key={j.id}>
-            <button className="resume-cell" onClick={() => void openJob(j.id)}>
+            <button className="resume-cell" data-job-id={j.id} onClick={() => void openJob(j.id)}>
               <span className="file-icon">
                 <FileText size={19} />
                 <small>{j.format.toUpperCase()}</small>
@@ -491,6 +493,7 @@ export default function Workspace() {
           <div className="row topbar-actions">
             <button
               className="search-button"
+              aria-label="Quick search"
               onClick={() => {
                 setQuery("");
                 setModal("search");
@@ -498,8 +501,8 @@ export default function Workspace() {
             >
               <Search size={15} />
               <span>Quick search</span>
-              <kbd>
-                <Command size={11} /> K
+              <kbd aria-hidden="true">
+                <Command size={11} /><span>K</span>
               </kbd>
             </button>
             <span className="topbar-line" />
@@ -1021,13 +1024,20 @@ export default function Workspace() {
                         days.
                       </span>
                     </div>
-                    <Button
-                      disabled={uploading || !file || jd.trim().length < 100}
-                      onClick={() => void upload()}
-                    >
-                      {uploading ? <Spinner /> : <Sparkles size={17} />}{" "}
-                      {uploading ? "Saving your resume…" : "Analyze my resume"}
-                    </Button>
+                    <div className="row studio-submit-actions">
+                      {automaticTailoring && <Button
+                        kind="secondary"
+                        disabled={uploading || !file || jd.trim().length < 100}
+                        onClick={() => void upload(false)}
+                      >Analyze my resume</Button>}
+                      <Button
+                        disabled={uploading || !file || jd.trim().length < 100}
+                        onClick={() => void upload(automaticTailoring)}
+                      >
+                        {uploading ? <Spinner /> : <Sparkles size={17} />}{" "}
+                        {uploading ? "Saving your resume…" : automaticTailoring ? "Analyze and tailor" : "Analyze my resume"}
+                      </Button>
+                    </div>
                   </div>
                 </>
               )}

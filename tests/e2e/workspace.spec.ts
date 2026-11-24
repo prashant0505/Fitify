@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { createReadStream } from "node:fs";
 test.beforeEach(async ({ page }) => {
   await page.goto("/signin-with-chatgpt?return_to=%2F");
   await expect(
@@ -34,7 +35,12 @@ test("dashboard, studio, real upload, persisted analysis and gated download", as
   await expect(
     page.getByText("Skills that connect", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("30", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Keyword coverage 30\/100/)).toBeVisible();
+  const requirements = page.getByRole("region", { name: "Job requirements checklist" });
+  const aws = requirements.locator("article").filter({ has: page.getByText("AWS", { exact: true }) });
+  await expect(aws.getByText("Preferred", { exact: true })).toBeVisible();
+  await expect(aws.getByText("Evidence needed.")).toBeVisible();
+  await expect(requirements.getByRole("textbox")).toHaveCount(0);
   const config = await (await page.request.get("/api/config")).json();
   if (config.aiReady && config.documentReady)
     await expect(
@@ -73,6 +79,32 @@ test("dashboard, studio, real upload, persisted analysis and gated download", as
   // Only the synthetic record created in this test is removed through the authenticated API.
   await request.delete(`/api/jobs/${jobId}`, { headers: { Cookie: cookie } });
 });
+test("automatic tailoring continues directly from analysis to rewriting", async ({ page }) => {
+  const config = await (await page.request.get("/api/config")).json();
+  test.skip(!config.aiReady || !config.documentReady, "Automatic tailoring needs both services.");
+  const response = await page.request.post("/api/jobs", {
+    multipart: {
+      file: createReadStream(path.resolve("work/sample-resume.docx")),
+      jd: "Required: React and TypeScript. Build accessible web applications and maintain frontend testing workflows alongside the product team.",
+      autoTailor: "1",
+    },
+  });
+  expect(response.status()).toBe(201);
+  const { id } = await response.json();
+  try {
+    for (let stage = 1; stage <= 3; stage++) {
+      const advance = await page.request.post(`/api/jobs/${id}/advance`);
+      expect(advance.ok()).toBeTruthy();
+      const job = await advance.json();
+      expect(job.stage).toBe(stage);
+      expect(job.status).toBe("processing");
+    }
+    // Stop before rewriting to avoid making an external AI request during the test.
+  } finally {
+    await page.request.delete(`/api/jobs/${id}`);
+  }
+});
+
 test("invalid uploads fail visibly, example can be cleared, and mobile does not overflow", async ({
   page,
 }) => {
@@ -183,7 +215,7 @@ test("ready PDF supports highlighted and clean preview modes", async ({
 }) => {
   const jobs = await (await page.request.get("/api/jobs")).json();
   const ready = jobs.find(
-    (j: { status: string; format: string }) =>
+    (j: { id: string; status: string; format: string }) =>
       j.status === "ready" && j.format === "pdf",
   );
   test.skip(
@@ -196,9 +228,7 @@ test("ready PDF supports highlighted and clean preview modes", async ({
   );
   await page.getByRole("button", { name: /My resumes/ }).click();
   await page
-    .locator(".resume-cell")
-    .filter({ hasText: ready.name })
-    .first()
+    .locator(`.resume-cell[data-job-id="${ready.id}"]`)
     .click();
   await page
     .getByRole("tab", { name: "Document preview", exact: true })

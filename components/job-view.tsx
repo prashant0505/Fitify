@@ -22,6 +22,9 @@ import {
 import { Badge, Button, Spinner, CheckLine } from "./ui";
 import PdfPreview from "./pdf-preview";
 import { STAGES, type Job } from "@/lib/types";
+import { tailoredCoverage } from "@/lib/analysis";
+import { assessAlignment, TARGET_ALIGNMENT } from "@/lib/requirements";
+import { RequirementsChecklist } from "./requirements-checklist";
 export default function JobView({
   job,
   onAction,
@@ -45,6 +48,16 @@ export default function JobView({
   const analysis = job.analysis,
     ready = job.status === "ready",
     processing = job.status === "processing";
+  const tailored = ready && job.validation?.passed && analysis && job.segments && job.changes?.length
+    ? tailoredCoverage(analysis.required, job.segments, job.changes)
+    : undefined;
+  const coverage = tailored ?? analysis;
+  const baseline = assessAlignment(job.requirements ?? [], job.segments ?? []);
+  const alignment = tailored
+    ? assessAlignment(job.requirements ?? [], job.segments ?? [], job.changes)
+    : baseline;
+  const mustHaveGaps = alignment.gaps.filter((item) => item.priority === "Must-have").length;
+  const noEditablePdf = (job.pdfEngineVersion ?? 0) >= 3 && job.editable === false;
   const fileUrl = (type: string) => `/api/jobs/${job.id}/download?type=${type}`;
   return (
     <>
@@ -88,7 +101,7 @@ export default function JobView({
           <div>
             <strong>PDF tailoring</strong>
             <p>
-              {job.pdfEngineVersion === 2
+              {(job.pdfEngineVersion ?? 0) >= 2
                 ? job.notice
                 : "Editable PDF regions will be checked when tailoring starts. The original PDF remains untouched."}
             </p>
@@ -166,7 +179,7 @@ export default function JobView({
           </Button>
         </div>
       )}
-      {analysis && (
+      {analysis && coverage && (
         <>
           <div className="result-summary">
             <section className="card score-card">
@@ -174,35 +187,34 @@ export default function JobView({
                 className="score-ring"
                 style={
                   {
-                    "--score": `${analysis.score * 3.6}deg`,
+                    "--score": `${(alignment.score ?? 0) * 3.6}deg`,
                   } as React.CSSProperties
                 }
               >
                 <div>
                   <strong>
-                    {analysis.required.length ? analysis.score : "—"}
+                    {alignment.score ?? "—"}
                   </strong>
                   <span>
-                    {analysis.required.length
+                    {alignment.score !== null
                       ? "out of 100"
                       : "no recognized terms"}
                   </span>
                 </div>
               </div>
               <div>
-                <Badge tone="purple">KEYWORD ALIGNMENT</Badge>
+                <Badge tone="purple">JOB REQUIREMENT COVERAGE</Badge>
                 <h2>
-                  {analysis.score >= 75
-                    ? "A strong foundation."
-                    : analysis.score >= 40
-                      ? "Room to stand out."
-                      : "Let’s find your strongest fit."}
+                  {tailored ? "Tailored resume" : "Original resume"}
                 </h2>
                 <p>
-                  {analysis.matched.length} of {analysis.required.length}{" "}
-                  recognized keywords matched.
+                  {alignment.items.length - alignment.gaps.length} of {alignment.items.length} recognized requirement groups covered.
                 </p>
-                <small>Indicative keyword coverage. Not an ATS result.</small>
+                {mustHaveGaps > 0 && <p>{mustHaveGaps} must-have {mustHaveGaps === 1 ? "gap" : "gaps"}.</p>}
+                {tailored && baseline.score !== null && (
+                  <p>Original coverage {baseline.score}/100</p>
+                )}
+                {alignment.score !== null && <small>Coverage target {TARGET_ALIGNMENT}/100 · Keyword coverage {coverage.score}/100</small>}
               </div>
             </section>
             <section className="card target-card">
@@ -239,15 +251,16 @@ export default function JobView({
           </div>
           {tab === "analysis" && (
             <div className="analysis-grid">
+              <RequirementsChecklist job={job} />
               <section className="card">
                 <div className="row between">
                   <h3>Skills that connect</h3>
-                  <Badge tone="green">{analysis.matched.length} matched</Badge>
+                  <Badge tone="green">{coverage.matched.length} matched</Badge>
                 </div>
-                <p>Already supported by your original resume.</p>
+                <p>Recognized terms in the {tailored ? "tailored" : "original"} resume.</p>
                 <div className="chips">
-                  {analysis.matched.length ? (
-                    analysis.matched.map((s) => (
+                  {coverage.matched.length ? (
+                    coverage.matched.map((s) => (
                       <Badge key={s} tone="green">
                         <Check size={12} />
                         {s}
@@ -268,21 +281,21 @@ export default function JobView({
               <section className="card">
                 <div className="row between">
                   <h3>Gaps to be aware of</h3>
-                  <Badge tone="amber">{analysis.missing.length} missing</Badge>
+                  <Badge tone="amber">{alignment.gaps.length} missing</Badge>
                 </div>
                 <p>
-                  These terms will not be added without supporting experience.
+                  Requirements still missing from the current resume.
                 </p>
                 <div className="chips">
-                  {analysis.missing.length ? (
-                    analysis.missing.map((s) => (
-                      <Badge key={s} tone="amber">
-                        {s}
+                  {alignment.gaps.length ? (
+                    alignment.gaps.map((gap) => (
+                      <Badge key={gap.id} tone="amber">
+                        {gap.terms.join(" or ")}
                       </Badge>
                     ))
                   ) : (
                     <span className="muted">
-                      No gaps among the recognized keywords.
+                      All recognized requirement groups are covered.
                     </span>
                   )}
                 </div>
@@ -506,13 +519,13 @@ export default function JobView({
                 disabled={
                   !aiReady ||
                   !engineReady ||
-                  (job.pdfEngineVersion === 2 && job.editable === false)
+                  noEditablePdf
                 }
               >
                 <Sparkles size={17} />
                 {!aiReady
                   ? "Connect AI to start tailoring"
-                  : job.pdfEngineVersion === 2 && job.editable === false
+                  : noEditablePdf
                     ? "No editable PDF text regions"
                     : "Tailor my resume"}
               </Button>

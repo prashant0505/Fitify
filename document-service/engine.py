@@ -1,5 +1,5 @@
 """Conservative OOXML editing. Original ZIP members remain byte-identical except document.xml."""
-import base64, copy, io, json, os, re, shutil, subprocess, tempfile, zipfile
+import base64, copy, io, json, os, re, shutil, subprocess, sys, tempfile, zipfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import pdfplumber
@@ -49,6 +49,12 @@ def paragraphs(xml):
     # Retain raw bytes and namespaces. Do not serialize the original XML tree.
     return list(re.finditer(rb'<w:p(?:\s[^>]*)?>[\s\S]*?</w:p>',xml))
 
+def is_skills_list(text, section):
+    if not re.fullmatch(r'(?:technical )?skills', section.strip().rstrip(':'), re.I):
+        return False
+    items = re.split(r'[,;•|]', text)
+    return len(items) > 1 and all(0 < len(item.split()) <= 6 for item in items)
+
 def extract_docx(data):
     z,xml=open_docx(data)
     section='Contact'
@@ -63,11 +69,13 @@ def extract_docx(data):
         protected=bool(re.search('education|certification|award|contact',section,re.I))
         description=bool(VERBS.match(text.strip())) or bool(re.search('summary|profile',section,re.I))
         complex_content=bool(re.search(rb'<w:(?:hyperlink|fldChar|instrText|drawing|object|tab|br|ins|del)\b',raw))
-        editable=len(texts)==1 and not protected and not complex_content and len(text)>65 and len(text.split())>8 and description and not HEADINGS.match(text.strip())
+        editable=len(texts)==1 and not protected and not complex_content and not HEADINGS.match(text.strip()) and (
+            (len(text)>65 and len(text.split())>8 and description) or is_skills_list(text, section)
+        )
         segments.append({'id':i,'text':text,'editable':bool(editable),'section':section})
     if len(segments)>500 or sum(len(s['text']) for s in segments)>60000: raise DocumentError('Resume is too long. Use a document under 60,000 characters and 500 paragraphs.')
     if not segments: raise DocumentError('No readable text was found in this DOCX.')
-    return {'segments':segments,'pages':None,'editable':any(s['editable'] for s in segments),'notice':'Mixed-format paragraphs, headings, education and contact details are protected. Only supported single-run descriptions are editable.'}
+    return {'segments':segments,'pages':None,'editable':any(s['editable'] for s in segments),'notice':'Supported single-run descriptions and skills lists are editable. Mixed-format paragraphs, headings, education and contact details are protected.'}
 
 def namespace_declarations(xml):
     root=re.search(rb'<w:document\b([^>]*)>',xml)
@@ -112,9 +120,32 @@ def edit_docx(data,changes):
         for item in z.infolist(): out.writestr(item,newxml if item.filename=='word/document.xml' else z.read(item.filename))
     return output.getvalue()
 
+def find_libreoffice():
+    override = os.environ.get("SOFFICE_BIN")
+    if override:
+        return override
+    command = "soffice.com" if sys.platform == "win32" else "soffice"
+    executable = shutil.which(command) or shutil.which("libreoffice")
+    if executable:
+        return executable
+    candidates = []
+    if sys.platform == "darwin":
+        candidates = [
+            base / "LibreOffice.app/Contents/MacOS/soffice"
+            for base in (Path("/Applications"), Path.home() / "Applications")
+        ]
+    elif sys.platform == "win32":
+        candidates = [
+            Path(base) / "LibreOffice/program/soffice.com"
+            for name in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)")
+            if (base := os.environ.get(name))
+        ]
+    return next((str(path) for path in candidates if path.is_file()), None)
+
+
 def render(data,directory,name):
     source=directory/(name+'.docx');source.write_bytes(data)
-    executable=os.environ.get('SOFFICE_BIN') or shutil.which('soffice') or shutil.which('libreoffice')
+    executable=find_libreoffice()
     if not executable: raise DocumentError('LibreOffice renderer is unavailable. Output cannot be validated for download.')
     profile=directory/(name+'-profile');out=directory/(name+'-render');out.mkdir()
     try:

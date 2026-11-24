@@ -24,6 +24,21 @@ def change(data):
     s=next(s for s in extract(data,'docx')['segments'] if 'accessible React applications' in s['text'])
     return {'id':s['id'],'original':s['text'],'replacement':s['text'].replace('reliable','robust'),'evidence':'Developed accessible React applications','reason':'Concise language'}
 class EngineTests(unittest.TestCase):
+    def test_reorders_skills_in_a_single_run(self):
+        doc = Document()
+        doc.add_paragraph('Technical Skills')
+        doc.add_paragraph('Python, SQL, React')
+        raw = io.BytesIO()
+        doc.save(raw)
+        data = raw.getvalue()
+        heading, skills = extract(data, 'docx')['segments']
+        self.assertFalse(heading['editable'])
+        self.assertTrue(skills['editable'])
+        edit = {'id': skills['id'], 'original': skills['text'],
+                'replacement': 'React, SQL, Python', 'evidence': skills['text']}
+        updated = Document(io.BytesIO(edit_docx(data, [edit])))
+        self.assertEqual(updated.paragraphs[1].text, 'React, SQL, Python')
+
     def test_extract_protects_identity_and_mixed_runs(self):
         segments=extract(fixture(),'docx')['segments']
         self.assertTrue(any(s['editable'] for s in segments))

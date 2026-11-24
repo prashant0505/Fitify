@@ -2,7 +2,13 @@ name: Verify FitiFy
 on: [push, pull_request]
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      FITIFY_E2E_MANAGED: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -13,21 +19,27 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
-      - run: pip install -r document-service/requirements-dev.txt
+      - run: python -m pip install -r document-service/requirements-dev.txt
       - run: sudo apt-get update && sudo apt-get install -y libreoffice-writer fonts-liberation fonts-dejavu-core
-      - run: npm run typecheck && npm run lint && npm test
+        if: runner.os == 'Linux'
+      - run: brew install --cask libreoffice
+        if: runner.os == 'macOS'
+      - run: choco install libreoffice-fresh --yes --no-progress
+        if: runner.os == 'Windows'
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
       - run: python -m unittest discover -s document-service -p 'test_*.py' -v
-      - run: npm run db:local && python scripts/create-test-fixture.py
-      - run: python scripts/dev-document-service.py > /tmp/fitify-doc-service.log 2>&1 &
-      - run: npm run dev -- --host 127.0.0.1 > /tmp/fitify-app.log 2>&1 &
+      - run: python scripts/create-test-fixture.py
       - run: npx playwright install --with-deps chromium
+        if: runner.os == 'Linux'
+      - run: npx playwright install chromium
+        if: runner.os != 'Linux'
       - name: Browser workflows
-        run: |
-          for i in $(seq 1 30); do if curl -fsS http://127.0.0.1:5173/ > /dev/null; then break; fi; sleep 2; done
-          npm run test:e2e -- --update-snapshots=missing
+        run: npm run test:e2e -- --update-snapshots=missing
       - run: npm run build
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: verification-failures
+          name: verification-failures-${{ runner.os }}
           path: test-results/

@@ -33,6 +33,60 @@ def edit_for(data):
     return {'id':seg['id'],'original':seg['text'],'replacement':seg['text'].replace('reliable','robust'),'evidence':'React interfaces','reason':'More concise wording'}
 
 class PdfEngineTests(unittest.TestCase):
+    def test_wider_edit_can_use_blank_space_on_existing_line(self):
+        data = fixture()
+        change = edit_for(data)
+        change['replacement'] = change['original'].replace('reliable', 'dependable')
+        self.assertTrue(check_fit(data, [change])['fits'])
+        result = generate(data, [change], 'pdf')
+        self.assertTrue(result['validation']['passed'])
+        with pymupdf.open(stream=base64.b64decode(result['pdf']), filetype='pdf') as updated:
+            self.assertIn('dependable web applications', updated[0].get_text())
+
+    def test_wider_edit_cannot_cover_adjacent_artwork(self):
+        data = fixture()
+        box = pymupdf.Rect(extract(data, 'pdf')['previewRegions'][0]['bbox'])
+        with pymupdf.open(stream=data, filetype='pdf') as doc:
+            doc[0].draw_line((box.x1 + 8, box.y0), (box.x1 + 8, box.y1), color=(0, 0, 0))
+            data = doc.tobytes()
+        change = edit_for(data)
+        change['replacement'] = change['original'].replace('reliable', 'dependable')
+        self.assertFalse(check_fit(data, [change])['fits'])
+
+    def test_wrap_uses_each_original_baseline_start(self):
+        output = io.BytesIO()
+        page = canvas.Canvas(output)
+        page.setFont('Helvetica-Bold', 11)
+        page.drawString(42, 665, 'Summary')
+        page.setFont('Helvetica', 10)
+        page.drawString(42, 640, 'Developed React applications for production.')
+        page.drawString(42, 628, ' Automated testing for reliable web releases.')
+        page.save()
+        data = output.getvalue()
+        change = edit_for(data)
+        change['evidence'] = 'Automated testing'
+        self.assertTrue(check_fit(data, [change])['fits'])
+        self.assertTrue(generate(data, [change], 'pdf')['validation']['passed'])
+
+    def test_reorders_skills_in_a_supported_pdf_region(self):
+        output = io.BytesIO()
+        page = canvas.Canvas(output)
+        page.setFont('Helvetica-Bold', 12)
+        page.drawString(40, 750, 'Technical Skills')
+        page.setFont('Helvetica', 10)
+        page.drawString(40, 730, 'Python, SQL, React')
+        page.save()
+        data = output.getvalue()
+        heading, skills = extract(data, 'pdf')['segments']
+        self.assertFalse(heading['editable'])
+        self.assertTrue(skills['editable'])
+        edit = {'id': skills['id'], 'original': skills['text'],
+                'replacement': 'React, SQL, Python', 'evidence': skills['text']}
+        result = generate(data, [edit], 'pdf')
+        self.assertTrue(result['validation']['passed'])
+        with pymupdf.open(stream=base64.b64decode(result['pdf']), filetype='pdf') as updated:
+            self.assertIn('React, SQL, Python', updated[0].get_text())
+
     def test_supported_pdf_is_editable_and_headers_are_protected(self):
         result=extract(fixture(),'pdf');self.assertTrue(result['editable']);self.assertEqual(result['pages'],2)
         self.assertFalse(next(s for s in result['segments'] if 'EXAMPLE CANDIDATE' in s['text'])['editable'])

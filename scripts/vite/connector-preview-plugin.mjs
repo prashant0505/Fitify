@@ -54,9 +54,12 @@ export function connectorPreview() {
             deny: [
               ".env",
               ".env.*",
+              ".dev.vars",
+              ".dev.vars.*",
               "*.{crt,pem}",
               "**/.git/**",
               "**/.sites-runtime/**",
+              "**/output/pdf/**",
             ],
           },
           watch: { ignored: ["**/.sites-runtime/**"] },

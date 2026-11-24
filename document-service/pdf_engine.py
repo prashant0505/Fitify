@@ -21,7 +21,7 @@ from collections import Counter
 import pymupdf
 from PIL import Image, ImageChops, ImageDraw
 
-ENGINE_VERSION = 2
+ENGINE_VERSION = 3
 BASE_FONTS = {
     'Helvetica':'helv','Helvetica-Bold':'hebo','Helvetica-Oblique':'heit','Helvetica-BoldOblique':'hebi',
     'Times-Roman':'tiro','Times-Bold':'tibo','Times-Italic':'tiit','Times-BoldItalic':'tibi',
@@ -33,6 +33,21 @@ def _error(message):
     return DocumentError(message)
 
 def _name(name): return re.sub(r'^[A-Z]{6}\+','',name).replace(' ','').lower()
+
+
+def _right_edge(page, bbox, obstacles):
+    # Allow a small extension into visibly empty space while staying inside the
+    # page margin and leaving a gap before adjacent content.
+    right = min(bbox.x1 + 36, page.rect.x1 - 24)
+    for obstacle in obstacles:
+        if obstacle.y0 < bbox.y1 + 1 and obstacle.y1 > bbox.y0 - 1 and obstacle.x1 > bbox.x1 + .01:
+            right = min(right, obstacle.x0 - 3)
+    if right <= bbox.x1 + 1:
+        return bbox.x1
+    strip = pymupdf.Rect(bbox.x1, bbox.y0, right, bbox.y1)
+    pixmap = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=strip, alpha=False)
+    image = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
+    return right if all(high - low <= 2 for low, high in image.getextrema()) else bbox.x1
 def _normal(text): return re.sub(r'\s+',' ',text).strip()
 
 def _font(doc,page,name):
@@ -52,7 +67,7 @@ def _font(doc,page,name):
     return None
 
 def inspect_pdf(data):
-    from engine import HEADINGS, VERBS
+    from engine import HEADINGS, VERBS, is_skills_list
     try:doc=pymupdf.open(stream=data,filetype='pdf')
     except Exception:raise _error('This PDF is corrupted or cannot be opened.')
     try:
@@ -95,10 +110,13 @@ def inspect_pdf(data):
                     for group in groups:
                         box=pymupdf.Rect(group[0]['bbox'])
                         for span in group[1:]:box|=pymupdf.Rect(span['bbox'])
-                        units.append({'type':0,'bbox':tuple(box),'context':context,'lines':[dict(line,spans=group,bbox=tuple(box))]})
+                        source_line = _normal(''.join(span['text'] for span in line['spans']))
+                        units.append({'type':0,'bbox':tuple(box),'context':context,'sourceLine':source_line,
+                                      'lines':[dict(line,spans=group,bbox=tuple(box))]})
             obstacles=[pymupdf.Rect(s['bbox']) for b in blocks if b.get('type')==0 for line in b['lines'] for s in line['spans'] if s['text'].strip()]
             protected_areas=[pymupdf.Rect(x['from']) for x in page.get_links() if 'from' in x]
             protected_areas += [pymupdf.Rect(a.rect) for a in (page.annots() or [])]
+            images = [pymupdf.Rect(image['bbox']) for image in page.get_image_info()]
             for block in units:
                 if block.get('type')!=0:continue
                 lines=[line for line in block['lines'] if any(s['text'].strip() for s in line['spans'])]
@@ -110,7 +128,7 @@ def inspect_pdf(data):
                 style={(s['font'],round(s['size'],3),s['color']) for s in spans}
                 bbox=pymupdf.Rect(block['bbox']);reason=None
                 description=(VERBS.match(text) or re.search('summary|profile|experience|employment|project',section,re.I)) and not HEADINGS.match(text)
-                if len(text)<=35 or len(text.split())<6 or not description or re.search('education|certification|award',section,re.I):reason='Protected identity, heading or non-description text'
+                if not (is_skills_list(text, section) or (len(text)>35 and len(text.split())>=6 and description)) or re.search('education|certification|award',section,re.I):reason='Protected identity, heading or non-description text'
                 elif re.search(r'\b(?:19|20)\d{2}\b',text) and not VERBS.match(text):reason='Protected date or employment header'
                 elif any('bold' in s['font'].lower() or s.get('flags',0)&16 for s in spans):reason='Emphasized text protected'
                 elif page.rotation or any(tuple(line.get('dir',(1,0)))!=(1.0,0.0) for line in lines):reason='Rotated text'
@@ -128,13 +146,28 @@ def inspect_pdf(data):
                 editable=reason is None
                 segments.append({'id':identifier,'text':text,'editable':editable,'section':section,
                     'context':block.get('context',text),'maxCharacters':len(text),'layoutHint':'Keep this PDF paragraph shorter than its original; use only characters present in the original font.'})
+                if 'sourceLine' in block:
+                    segments[-1]['sourceLine'] = block['sourceLine']
                 if editable:
                     line_x=[]
                     for line in lines:
                         raw=''.join(span['text'] for span in line['spans'])
                         leading=raw[:len(raw)-len(raw.lstrip())]
                         line_x.append(line['spans'][0]['origin'][0]+font['font'].text_length(leading,fontsize=size))
+                    right = _right_edge(page, bbox, obstacles + protected_areas + images)
+                    line_widths = [right - x for x in line_x]
+                    # Character count supplements the actual font-width check.
+                    width_ratio = sum(line_widths) / sum(bbox.x1 - x for x in line_x)
+                    segments[-1]['maxCharacters'] = min(
+                        int(len(text) * width_ratio), int(max(len(text) * 1.12, len(text) + 8)),
+                    )
+                    segments[-1]['layoutHint'] = (
+                        f"Fit within {len(lines)} lines at the existing font size. "
+                        f"Original line lengths: {', '.join(str(len(text)) for text in texts)} characters. "
+                        "Wide letters and long words take more room. Prefer compact wording."
+                    )
                     regions[identifier]={'page':page_number,'bbox':tuple(bbox),'font':font,'size':size,'color':color,
+                        'lineWidths':line_widths,
                         'baselines':[line['spans'][0]['origin'][1] for line in lines],
                         'lineX':line_x,'x':line_x[0], 'text':text}
                 else:reasons[reason]+=1
@@ -155,45 +188,85 @@ def extract_pdf(data):
             'pdfProtectedRegions':dict(reasons),'previewRegions':[{'id':identifier,'page':r['page'],'bbox':list(r['bbox'])} for identifier,r in regions.items()]}
     finally:doc.close()
 
-def _wrap(text,font,size,width):
-    words=text.split();lines=[];line=''
-    for word in words:
-        if font.text_length(word,fontsize=size)>width+.25:raise _error('A replacement word exceeds the original PDF text width.')
-        candidate=(line+' '+word).strip()
-        if font.text_length(candidate,fontsize=size)<=width+.25:line=candidate
-        else:lines.append(line);line=word
-    if line:lines.append(line)
+def _wrap(text, font, size, widths):
+    lines = []
+    line = ''
+    for word in text.split():
+        candidate = f'{line} {word}' if line else word
+        if font.text_length(candidate, fontsize=size) <= widths[len(lines)] + .025:
+            line = candidate
+            continue
+        if not line or len(lines) + 1 >= len(widths):
+            raise _error('The rewrite exceeds the available width on the original PDF lines.')
+        lines.append(line)
+        if font.text_length(word, fontsize=size) > widths[len(lines)] + .025:
+            raise _error('A replacement word exceeds the available width on its PDF line.')
+        line = word
+    if line:
+        lines.append(line)
     return lines
 
-def plans_for(data,changes):
-    doc,segments,regions,reasons=inspect_pdf(data)
+
+def _plan(change, region):
+    if not region or change.get('original') != region['text']:
+        raise _error('A PDF edit targets protected or mismatched source text.')
+    replacement = change.get('replacement', '')
+    original = region['text']
+    if not replacement.strip() or '\n' in replacement or len(replacement) > max(len(original) * 1.12, len(original) + 8):
+        raise _error('A PDF edit exceeds its original text budget.')
+    if re.findall(r'\d+(?:[.,]\d+)?%?', original) != re.findall(r'\d+(?:[.,]\d+)?%?', replacement):
+        raise _error('A PDF edit changes a numerical claim.')
+    if not change.get('evidence') or change['evidence'] not in original:
+        raise _error('A PDF edit lacks source evidence.')
+    font = region['font']['font']
+    if not all(font.has_glyph(ord(ch)) for ch in replacement if not ch.isspace()):
+        raise _error('The original PDF font lacks a requested character. Use simpler wording.')
+    lines = _wrap(replacement, font, region['size'], region['lineWidths'])
+    x0, y0, x1, y1 = region['bbox']
+    used_right = max(
+        x + font.text_length(line, fontsize=region['size'])
+        for x, line in zip(region['lineX'], lines)
+    )
+    return (change, {**region, 'outputBox': (x0, y0, max(x1, used_right), y1)}, lines)
+
+
+def plans_for(data, changes):
+    doc, segments, regions, _ = inspect_pdf(data)
     try:
-        if not isinstance(changes,list) or not 0<len(changes)<=100:raise _error('No valid PDF edits were provided.')
-        seen=set();plans=[]
-        for c in changes:
-            identifier=c.get('id');r=regions.get(identifier)
-            if identifier in seen or not r or c.get('original')!=r['text']:raise _error('A PDF edit targets protected or mismatched source text.')
-            seen.add(identifier);replacement=c.get('replacement','')
-            if not replacement.strip() or '\n' in replacement or len(replacement)>max(len(r['text'])*1.12,len(r['text'])+8):raise _error('A PDF edit exceeds its original text budget.')
-            if re.findall(r'\d+(?:[.,]\d+)?%?',r['text'])!=re.findall(r'\d+(?:[.,]\d+)?%?',replacement):raise _error('A PDF edit changes a numerical claim.')
-            if not c.get('evidence') or c['evidence'] not in r['text']:raise _error('A PDF edit lacks source evidence.')
-            if not all(r['font']['font'].has_glyph(ord(ch)) for ch in replacement if not ch.isspace()):raise _error('The original embedded PDF font does not contain a requested character. Use simpler wording with available characters.')
-            bbox=pymupdf.Rect(r['bbox']);lines=_wrap(replacement,r['font']['font'],r['size'],bbox.x1-max(r['lineX']))
-            if len(lines)>len(r['baselines']):raise _error('The rewrite exceeds the original PDF line count. Return shorter replacements within the existing text regions.')
-            plans.append((c,r,lines))
-        return doc,segments,plans
-    except Exception:doc.close();raise
+        if not isinstance(changes, list) or not 0 < len(changes) <= 100:
+            raise _error('No valid PDF edits were provided.')
+        seen = set()
+        plans = []
+        for change in changes:
+            identifier = change.get('id')
+            if identifier in seen:
+                raise _error('More than one edit targets the same PDF region.')
+            plans.append(_plan(change, regions.get(identifier)))
+            seen.add(identifier)
+        return doc, segments, plans
+    except Exception:
+        doc.close()
+        raise
+
 
 @serialized
-def check_fit(data,changes):
-    if not isinstance(changes,list) or not changes:return {'fits':False,'reason':'No PDF edits supplied.','rejectedIds':[]}
-    rejected=[];reason=''
-    for change in changes:
-        try:
-            doc,_,_=plans_for(data,[change]);doc.close()
-        except ValueError as error:
-            rejected.append(change.get('id'));reason=str(error)
-    return {'fits':not rejected,'reason':reason,'rejectedIds':rejected}
+def check_fit(data, changes):
+    if not isinstance(changes, list) or not changes:
+        return {'fits': False, 'reason': 'No PDF edits supplied.', 'rejectedIds': []}
+    doc, _, regions, _ = inspect_pdf(data)
+    try:
+        rejected = []
+        reason = ''
+        for change in changes:
+            try:
+                _plan(change, regions.get(change.get('id')))
+            except ValueError as error:
+                rejected.append(change.get('id'))
+                reason = str(error)
+        return {'fits': not rejected, 'reason': reason, 'rejectedIds': rejected}
+    finally:
+        doc.close()
+
 
 def _validate(original,result,segments,plans):
     checks=['Original PDF pages edited directly; no document recreation','Original page count, dimensions and rotation retained',
@@ -205,16 +278,18 @@ def _validate(original,result,segments,plans):
             if a.rect!=b.rect or a.rotation!=b.rotation:raise _error('PDF page geometry changed. Download blocked.')
             page_plans=[p for p in plans if p[1]['page']==pi]
             for c,r,_ in page_plans:
-                area=pymupdf.Rect(r['bbox'])+(-.05,-.05,.05,.05)
+                original_area=pymupdf.Rect(r['bbox'])+(-.05,-.05,.05,.05)
+                area=pymupdf.Rect(r['outputBox'])+(-.05,-.05,.05,.05)
                 actual=_normal(b.get_text('text',clip=area))
                 if actual!=_normal(c['replacement']):raise _error('Replacement text is missing or clipped. PDF download blocked.')
-                original_styles=[(s['font'],round(s['size'],2),s['color']) for block in a.get_text('dict')['blocks'] if block.get('type')==0 for line in block['lines'] for s in line['spans'] if area.contains(pymupdf.Rect(s['bbox']))]
+                original_styles=[(s['font'],round(s['size'],2),s['color']) for block in a.get_text('dict')['blocks'] if block.get('type')==0 for line in block['lines'] for s in line['spans'] if original_area.contains(pymupdf.Rect(s['bbox']))]
                 output_styles=[(s['font'],round(s['size'],2),s['color']) for block in b.get_text('dict')['blocks'] if block.get('type')==0 for line in block['lines'] for s in line['spans'] if area.contains((pymupdf.Rect(s['bbox']).tl+pymupdf.Rect(s['bbox']).br)/2)]
                 # Embedded resource names can gain a subset prefix; compare canonical face names.
                 allowed={(_name(n),size,color) for n,size,color in original_styles}
                 if not output_styles or any((_name(n),size,color) not in allowed for n,size,color in output_styles):raise _error('PDF font style changed. Download blocked.')
-            edited=[pymupdf.Rect(r['bbox']) for _,r,_ in page_plans]
-            def stable_spans(page):
+            original_regions=[pymupdf.Rect(r['bbox']) for _,r,_ in page_plans]
+            output_regions=[pymupdf.Rect(r['outputBox']) for _,r,_ in page_plans]
+            def stable_spans(page, edited):
                 result=[]
                 for block in page.get_text('dict')['blocks']:
                     if block.get('type')!=0:continue
@@ -223,14 +298,14 @@ def _validate(original,result,segments,plans):
                             if span['text'].strip() and not any(rect.intersects(pymupdf.Rect(span['bbox'])) for rect in edited):
                                 result.append((span['text'],tuple(round(x,2) for x in span['bbox']),span['font'],round(span['size'],2),span['color']))
                 return Counter(result)
-            if stable_spans(a)!=stable_spans(b):raise _error('Untouched PDF text changed. Download blocked.')
+            if stable_spans(a, original_regions)!=stable_spans(b, output_regions):raise _error('Untouched PDF text changed. Download blocked.')
             pix_a=a.get_pixmap(matrix=pymupdf.Matrix(1.5,1.5),alpha=False)
             pix_b=b.get_pixmap(matrix=pymupdf.Matrix(1.5,1.5),alpha=False)
             image_a=Image.frombytes('RGB',[pix_a.width,pix_a.height],pix_a.samples)
             image_b=Image.frombytes('RGB',[pix_b.width,pix_b.height],pix_b.samples)
             diff=ImageChops.difference(image_a,image_b)
             mask=ImageDraw.Draw(diff)
-            for rect in edited:
+            for rect in output_regions:
                 mask.rectangle((math.floor((rect.x0-1)*1.5),math.floor((rect.y0-1)*1.5),math.ceil((rect.x1+1)*1.5),math.ceil((rect.y1+1)*1.5)),fill=(0,0,0))
             if diff.getbbox():raise _error('PDF artwork or content outside the edited regions changed. Download blocked.')
         return {'passed':True,'pagesOriginal':len(before),'pagesTailored':len(after),'checks':checks,

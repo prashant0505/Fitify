@@ -3,6 +3,8 @@ export type Segment = {
   text: string;
   editable: boolean;
   section: string;
+  maxCharacters?: number;
+  sourceLine?: string;
 };
 export type Analysis = {
   title: string;
@@ -24,6 +26,13 @@ export type Change = {
   replacement: string;
   reason: string;
   evidence: string;
+};
+export type ConfirmedEvidence = { term: string; detail: string; targetId?: number };
+export type JobRequirement = {
+  term: string;
+  priority: "Must-have" | "Preferred" | "Listed";
+  description: string;
+  alternatives?: string[];
 };
 export type Validation = {
   passed: boolean;
@@ -52,6 +61,8 @@ export type Job = {
   editable?: boolean;
   notice?: string;
   pdfEngineVersion?: number;
+  requirements?: JobRequirement[];
+  confirmedEvidence?: ConfirmedEvidence[];
 };
 export const STAGES = [
   "Extracting document content",
