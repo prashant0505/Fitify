@@ -1,0 +1,267 @@
+/* Compact product typography. Keep the 16px root for stable layout and zoom;
+   reduce text independently so controls and navigation retain their spacing. */
+:root {
+  --type-body: 0.875rem;
+  --type-ui: 0.8125rem;
+  --type-caption: 0.75rem;
+}
+body {
+  font-size: var(--type-body);
+}
+p {
+  font-size: var(--type-body);
+  line-height: 1.65;
+}
+h1,
+.page-heading h1 {
+  font-size: clamp(1.375rem, 1rem + 0.6vw, 1.75rem);
+  line-height: 1.35;
+  letter-spacing: -0.035em;
+}
+h2 {
+  font-size: 1.0625rem;
+}
+h3,
+h4 {
+  font-size: 0.9375rem;
+}
+.page-heading p {
+  font-size: var(--type-body);
+}
+.hero-copy h2 {
+  font-size: clamp(2rem, 3.6cqw, 2.625rem);
+  line-height: 1.12;
+}
+.hero-copy em {
+  font-size: 1.1em;
+}
+.hero-copy p {
+  font-size: var(--type-body);
+  line-height: 1.7;
+}
+.hero .badge.purple {
+  font-size: 0.6875rem;
+}
+.hero-proof span {
+  font-size: 0.6875rem;
+}
+.hero-copy .button,
+.button,
+.page-heading .button,
+.settings-grid .button,
+.bottom-action .button,
+.dropzone .button,
+.modal .button {
+  font-size: var(--type-ui);
+}
+.topbar,
+.topbar strong,
+.search-button,
+.private-label {
+  font-size: var(--type-ui);
+}
+.sidebar .brand {
+  font-size: 1.5rem;
+}
+.sidebar .nav-item {
+  font-size: var(--type-ui);
+}
+.sidebar-bottom > .nav-item {
+  font-size: 0.75rem;
+}
+.workspace-picker,
+.workspace-picker > span:nth-child(2) {
+  font-size: 0.75rem;
+}
+.profile strong {
+  font-size: 0.75rem;
+}
+.profile small {
+  font-size: 0.6875rem;
+}
+.eyebrow,
+.page-heading .eyebrow,
+.dashboard-section-heading .eyebrow,
+.section-heading .eyebrow,
+.guide-heading .eyebrow {
+  font-size: 0.6875rem;
+}
+.dashboard-section-heading h2 {
+  font-size: 1rem;
+}
+.stat .row > span,
+.stat p {
+  font-size: var(--type-ui);
+}
+.stat > strong {
+  font-size: 1.875rem;
+  line-height: 1.2;
+}
+.section-heading h2 {
+  font-size: 0.9375rem;
+}
+.section-heading .text-button,
+.text-button {
+  font-size: var(--type-ui);
+}
+.history-table .resume-cell strong,
+.resume-cell strong {
+  font-size: var(--type-ui);
+}
+.history-table .resume-cell small,
+.resume-cell small,
+.table-date {
+  font-size: 0.75rem;
+}
+.history-table .table-head {
+  font-size: 0.625rem;
+}
+.history-table .table-row .badge {
+  font-size: 0.6875rem;
+}
+.workflow-guide h2 {
+  font-size: 1.25rem;
+}
+.workflow-guide > p,
+.workflow-guide li strong,
+.workflow-guide li p,
+.workflow-guide .button {
+  font-size: var(--type-ui);
+}
+.principles span {
+  font-size: 0.6875rem;
+}
+.card-step h2,
+.settings-grid h2,
+.score-card h2,
+.target-card h2,
+.changes h2,
+.processing-main h2 {
+  font-size: 1rem;
+}
+.card-step p,
+.dropzone p,
+.upload-guidance p,
+.detected-role span,
+.settings-grid p,
+.setup-details p,
+.analysis-grid p,
+.score-card p,
+.target-card p,
+.changes > div > div > p,
+.change-columns p,
+.empty-state p,
+.history-empty p,
+.notice p,
+.error-box p,
+.modal > p {
+  font-size: var(--type-body);
+}
+.upload-guidance strong,
+.connection strong,
+.dropzone h3,
+.analysis-grid h3,
+.validation h3,
+.privacy-row,
+.setup-details,
+.check-line {
+  font-size: var(--type-ui);
+}
+.jd-editor {
+  font-size: var(--type-body);
+  line-height: 1.75;
+}
+.editor-foot,
+.editor-foot .text-button,
+.detected small,
+.fine-print,
+.connection small,
+.review-check,
+.original-download,
+.change-reason {
+  font-size: 0.75rem;
+}
+.tabs button,
+.toggle button,
+.preview-toolbar,
+.bottom-action > div:first-child,
+.history-search input,
+.filter,
+.filter select,
+.modal-search input,
+.search-result > span,
+.toast,
+.global-error,
+.error-box,
+.workflow-steps > span {
+  font-size: var(--type-ui);
+}
+.badge,
+.chips .badge,
+.detected .chips .badge,
+.analysis-grid .chips .badge {
+  font-size: 0.6875rem;
+}
+.score-ring strong {
+  font-size: 2rem;
+}
+.score-ring span,
+.score-card small {
+  font-size: 0.6875rem;
+}
+@media (max-width: 760px) {
+  .hero-copy h2 {
+    font-size: clamp(1.875rem, 6.5cqw, 2.375rem);
+  }
+  .page-heading h1 {
+    font-size: 1.375rem;
+  }
+  .hero-copy p,
+  .settings-grid p,
+  .analysis-grid p,
+  .empty-state p {
+    font-size: var(--type-body);
+  }
+  .stat > strong {
+    font-size: 1.75rem;
+  }
+  .tabs button,
+  .bottom-action .row .button,
+  .processing-main > p,
+  .stages > span,
+  .validation-checks .check-line {
+    font-size: var(--type-ui);
+  }
+  /* Editable fields stay at 16px to avoid automatic zoom on mobile browsers. */
+  .jd-editor,
+  .history-search input,
+  .modal-search input {
+    font-size: 1rem;
+  }
+}
+@media (max-width: 480px) {
+  .hero-copy h2 {
+    font-size: clamp(1.75rem, 8cqw, 2.125rem);
+  }
+  .hero .badge.purple,
+  .hero-proof span {
+    font-size: 0.625rem;
+  }
+  .stat > strong {
+    font-size: 1.75rem;
+  }
+  .stat .row > span,
+  .stat p {
+    font-size: var(--type-ui);
+  }
+  .dashboard-section-heading h2,
+  .section-heading h2 {
+    font-size: 0.9375rem;
+  }
+  .workflow-guide h2 {
+    font-size: 1.25rem;
+  }
+  .page-heading > .button {
+    font-size: var(--type-ui);
+  }
+}

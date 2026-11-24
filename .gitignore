@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vinext/
+.wrangler/
+.sites-runtime/
+.env*
+!.env.example
+.dev.vars
+__pycache__/
+.pytest_cache/
+.venv/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.DS_Store
+work/
+outputs/

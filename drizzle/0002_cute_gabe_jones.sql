@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `jobs_owner_request` ON `jobs` (`user_id`,`request_key`);

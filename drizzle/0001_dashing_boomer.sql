@@ -1,0 +1,1 @@
+ALTER TABLE `jobs` ADD `state_key` text DEFAULT 'state' NOT NULL;
